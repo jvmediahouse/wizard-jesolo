@@ -1,0 +1,117 @@
+@font-face {
+  font-family: 'Urbanist';
+  src: url('https://jesolo.it/wp-content/uploads/elementor/google-fonts/fonts/urbanist-l0x4df02ifml4hgcymqgxsfsjkk3.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 200 20% 98%;
+    --foreground: 210 40% 14%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 210 40% 14%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 40% 14%;
+
+    --primary: 205 78% 42%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 39 67% 70%;
+    --secondary-foreground: 210 40% 14%;
+
+    --muted: 200 18% 94%;
+    --muted-foreground: 210 10% 46%;
+
+    --accent: 39 67% 70%;
+    --accent-foreground: 210 40% 14%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 200 20% 88%;
+    --input: 200 20% 88%;
+    --ring: 205 78% 42%;
+
+    --radius: 0.75rem;
+
+    --ocean: 205 78% 42%;
+    --ocean-light: 200 60% 94%;
+    --ocean-deep: 210 80% 28%;
+    --sand: 39 67% 70%;
+    --sand-light: 40 60% 95%;
+    --sun: 42 92% 56%;
+    --sunset: 16 80% 58%;
+    --seafoam: 168 50% 68%;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 210 40% 8%;
+    --foreground: 200 20% 96%;
+
+    --card: 210 40% 12%;
+    --card-foreground: 200 20% 96%;
+
+    --popover: 210 40% 12%;
+    --popover-foreground: 200 20% 96%;
+
+    --primary: 205 70% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 39 50% 45%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 210 30% 18%;
+    --muted-foreground: 200 15% 60%;
+
+    --accent: 39 50% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 210 30% 22%;
+    --input: 210 30% 22%;
+    --ring: 205 70% 55%;
+
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Urbanist', system-ui, sans-serif;
+  }
+
+  h1, h2, h3 {
+    font-family: 'Urbanist', system-ui, sans-serif;
+  }
+}

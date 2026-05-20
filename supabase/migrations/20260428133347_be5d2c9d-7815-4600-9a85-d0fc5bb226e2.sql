@@ -1,0 +1,1 @@
+ALTER TABLE public.wizard_submissions ADD COLUMN has_pet boolean;

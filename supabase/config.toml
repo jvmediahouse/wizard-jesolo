@@ -1,0 +1,13 @@
+project_id = "gdxyjdggxtrhvieqtoct"
+
+[functions.sync-jesolo-data]
+verify_jwt = false
+
+[functions.generate-vacation-plan]
+verify_jwt = false
+
+[functions.manage-admins]
+verify_jwt = true
+
+[functions.send-wizard-emails]
+verify_jwt = false
