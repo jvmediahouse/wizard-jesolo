@@ -27,8 +27,7 @@ const Index = () => {
   const { mode, isEmbedded } = useEmbedMode();
   const isWidgetEmbed = mode === 'widget';
   const infoPointUrl = INFO_POINT_URLS[i18n.language] ?? INFO_POINT_URLS.en;
-  const backgroundIframeMessageType = 'wizart:navigate-background-iframe';
-
+  
   const renderStep = () => {
     switch (step) {
       case 'welcome':
@@ -40,19 +39,6 @@ const Index = () => {
               else if (path === 'plan') goTo('plan-date');
             }}
             onInfoClick={() => {
-              if (isEmbedded) {
-                if (window.parent !== window) {
-                  window.parent.postMessage(
-                    {
-                      type: backgroundIframeMessageType,
-                      url: infoPointUrl,
-                    },
-                    '*'
-                  );
-                }
-                return;
-              }
-
               window.open(infoPointUrl, '_blank', 'noopener,noreferrer');
             }}
           />
