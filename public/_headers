@@ -1,4 +1,4 @@
 /*
-  # Permette il framing solo da jesolo.it e suoi sottodomini
-  Content-Security-Policy: frame-ancestors 'self' https://jesolo.it https://*.jesolo.it
-  X-Frame-Options: ALLOWALL
+  X-Robots-Tag: noindex
+  X-Content-Type-Options: nosniff
+  Content-Security-Policy: frame-ancestors 'self' https://jesolo.it https://www.jesolo.it https://*.jesolo.it
