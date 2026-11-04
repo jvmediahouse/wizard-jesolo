@@ -33,7 +33,14 @@ export default function AuthPage() {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setSubmitting(false);
     if (error) {
-      toast.error(error.message);
+      const msg = error.message.toLowerCase();
+      if (msg.includes('email not confirmed')) {
+        toast.error('Email not confirmed. Open the confirmation link we sent you, then log in again.');
+      } else if (msg.includes('invalid login credentials')) {
+        toast.error('Invalid email or password. If your account was created before the database migration, sign up again.');
+      } else {
+        toast.error(error.message);
+      }
       return;
     }
     toast.success('Logged in');
@@ -43,7 +50,7 @@ export default function AuthPage() {
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: { emailRedirectTo: `${window.location.origin}/admin` },
@@ -53,7 +60,11 @@ export default function AuthPage() {
       toast.error(error.message);
       return;
     }
-    toast.success('Account created. You can log in now.');
+    if (data.session) {
+      toast.success('Account created. You can log in now.');
+    } else {
+      toast.success('Account created. Check your inbox and confirm your email before logging in.');
+    }
   };
 
   return (

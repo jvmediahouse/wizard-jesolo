@@ -95,6 +95,38 @@ Le Edge Functions (`generate-vacation-plan`, `sync-jesolo-data`) vanno deployate
 ```bash
 supabase functions deploy generate-vacation-plan
 supabase functions deploy sync-jesolo-data
+supabase functions deploy send-wizard-emails
+supabase functions deploy manage-admins
 ```
 
+> `manage-admins` serve al tab **Admin users** del pannello `/admin` (lista utenti, concessione/revoca del ruolo admin).
+
 > I secret delle edge functions (es. `OPENAI_API_KEY`) si configurano nel dashboard Supabase sotto **Edge Functions → Secrets**. Non aggiungere mai questi valori come variabili `VITE_*` — sarebbero esposti nel bundle del frontend.
+
+
+---
+
+## 7. Ricrea il primo amministratore
+
+`supabase db push` replica **solo lo schema**: gli utenti di `auth.users` e le righe di `public.user_roles` del vecchio progetto **non vengono copiati**. Sul nuovo progetto quindi nessuno può accedere a `/admin` finché non si ricrea almeno un admin. Dopo il primo, gli altri si gestiscono dal tab **Admin users** del pannello.
+
+1. **Configura gli URL di redirect.** In **Authentication → URL Configuration** imposta **Site URL** sul dominio di produzione e aggiungi in **Redirect URLs** `https://<dominio>/admin` (e `http://localhost:8080/admin` per lo sviluppo). Senza questo, il link di conferma email punta all'URL sbagliato.
+2. **Crea l'utente.** Hai due strade:
+   - da **Authentication → Users → Add user → Create new user**, con email, password e **Auto Confirm User** spuntato (consigliato: non richiede l'invio di email);
+   - oppure dal tab **Sign up** su `/auth`, confermando poi l'email. Lo SMTP di default di Supabase invia solo agli indirizzi dei membri del team del progetto e ha limiti molto bassi: per altri indirizzi serve uno SMTP personalizzato (**Authentication → Emails → SMTP Settings**).
+3. **Assegna il ruolo admin** da **SQL Editor**:
+
+```sql
+INSERT INTO public.user_roles (user_id, role)
+SELECT id, 'admin'::public.app_role
+FROM auth.users
+WHERE email = 'nome@dominio.it'
+ON CONFLICT (user_id, role) DO NOTHING;
+
+-- Verifica
+SELECT u.email, r.role
+FROM public.user_roles r
+JOIN auth.users u ON u.id = r.user_id;
+```
+
+4. Fai logout e login su `/auth`: verrai reindirizzato a `/admin` con accesso completo.
