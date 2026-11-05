@@ -239,6 +239,24 @@ async function syncBikeTours(supabase: any): Promise<number> {
   return deduped.length;
 }
 
+// Supabase/PostgREST errors are plain objects, not Error instances:
+// String(e) would log "[object Object]" and hide the real cause.
+function errorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === "object") {
+    const o = e as Record<string, unknown>;
+    const parts = [o.message, o.details, o.hint, o.code ? `code ${o.code}` : null]
+      .filter((p) => typeof p === "string" && p.trim() !== "");
+    if (parts.length) return parts.join(" | ");
+    try {
+      return JSON.stringify(e);
+    } catch {
+      // fall through
+    }
+  }
+  return String(e);
+}
+
 async function logSync(
   supabase: any,
   source: string,
@@ -366,7 +384,14 @@ async function mergeUpsert(
     return out;
   });
 
-  const { error } = await supabase.from(table).upsert(merged, { onConflict: pk });
+  // Batches mix brand-new rows (no created_at/updated_at) with merged
+  // existing rows (all columns). PostgREST builds the column list from the
+  // union of keys and, by default, writes NULL for keys a row lacks — which
+  // breaks NOT NULL columns like created_at. defaultToNull: false makes it
+  // use the column DEFAULT instead.
+  const { error } = await supabase
+    .from(table)
+    .upsert(merged, { onConflict: pk, defaultToNull: false });
   if (error) throw error;
 
   console.log(
@@ -993,7 +1018,7 @@ Deno.serve(async (req) => {
       results[name] = { ok: true, count };
       await logSync(supabase, name, "success", count, null, started);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errorMessage(e);
       console.error(`Sync ${name} failed:`, msg);
       results[name] = { ok: false, error: msg };
       await logSync(supabase, name, "error", 0, msg, started);
