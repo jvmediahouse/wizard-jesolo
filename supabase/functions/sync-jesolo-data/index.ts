@@ -26,9 +26,12 @@ const ACTIVITY_CATEGORIES_URL =
 const BIKE_ROUTES_URL = "https://jesolo.it/wp-json/wp/v2/pages?parent=1963";
 const BEACH_ESTABLISHMENTS_URL = "https://jesolo.it/wp-json/wp/v2/stabilimenti";
 
+// Plain product token, as tested with SiteGround support (Nov 2026): the
+// "Mozilla/5.0 (compatible; ...)" form is dropped before reaching the site
+// (connection reset, nothing in the server logs), the plain form gets 200.
 const WORDPRESS_HEADERS = {
   "accept": "application/json, text/plain, */*",
-  "user-agent": "Mozilla/5.0 (compatible; JesoloWizardSync/1.0)",
+  "user-agent": "JesoloWizardSync/1.0",
 };
 
 const DESKLINE_BASE_ROOT = "https://webapi.deskline.net/jesolo";
