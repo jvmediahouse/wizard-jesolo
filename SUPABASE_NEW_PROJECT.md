@@ -19,6 +19,8 @@ VITE_SUPABASE_PROJECT_ID=<nuovo-project-id>
 VITE_SUPABASE_PUBLISHABLE_KEY=<nuova-anon-key>
 ```
 
+È l'unico punto da modificare nel frontend: `src/integrations/supabase/client.ts` legge questi valori dal `.env` (anche nella build di Cloudflare Pages). All'avvio `src/integrations/supabase/config.ts` controlla che URL, project ID e chiave appartengano allo stesso progetto: se ne aggiorni solo una parte, l'app si ferma con un errore esplicito invece di collegarsi al progetto sbagliato.
+
 ---
 
 ## 3. Installa la Supabase CLI e collega il progetto locale al nuovo progetto remoto
