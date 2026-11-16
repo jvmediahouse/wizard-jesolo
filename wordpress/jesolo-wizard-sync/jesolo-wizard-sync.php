@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Jesolo Wizard Sync
  * Description:       Invia ogni 3 giorni eventi, attività, impianti sportivi, percorsi bici e pagine di questo sito al Wizard di Jesolo (Supabase).
- * Version:           1.0.0
+ * Version:           1.0.1
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Jesolo Media House
@@ -120,7 +120,8 @@ final class Jesolo_Wizard_Sync {
 				return self::rest_collect( '/wp/v2/strutture_sportive', array(), true );
 			},
 			'activity_categories'  => function () {
-				return self::terms( 'attivita-jesolo-category' );
+				// Optional: activities on jesolo.it are not categorised (Nov 2026).
+				return self::terms( 'attivita-jesolo-category', true );
 			},
 			'activities'           => function () {
 				return self::rest_collect( '/wp/v2/attivita-jesolo', array(), true );
@@ -192,9 +193,11 @@ final class Jesolo_Wizard_Sync {
 	/**
 	 * Taxonomy terms as { id, name, slug } (works even when the taxonomy has no REST route).
 	 */
-	private static function terms( $taxonomy ) {
-		if ( ! taxonomy_exists( $taxonomy ) ) {
-			return new WP_Error( 'jws_taxonomy', 'Tassonomia non trovata: ' . $taxonomy );
+	private static function terms( $key, $optional = false ) {
+		$taxonomy = self::resolve_taxonomy( $key );
+		if ( ! $taxonomy ) {
+			// An optional taxonomy missing on this site is not an error: send nothing.
+			return $optional ? array() : new WP_Error( 'jws_taxonomy', 'Tassonomia non trovata: ' . $key );
 		}
 		$terms = get_terms(
 			array(
@@ -215,6 +218,23 @@ final class Jesolo_Wizard_Sync {
 			},
 			$terms
 		);
+	}
+
+	/**
+	 * The server receives taxonomy ids under the REST field name (rest_base),
+	 * which can differ from the registered taxonomy name: accept either.
+	 */
+	private static function resolve_taxonomy( $key ) {
+		if ( taxonomy_exists( $key ) ) {
+			return $key;
+		}
+		foreach ( get_taxonomies( array(), 'objects' ) as $name => $tax ) {
+			$rest_base = ! empty( $tax->rest_base ) ? $tax->rest_base : $name;
+			if ( $rest_base === $key || ( isset( $tax->rewrite['slug'] ) && $tax->rewrite['slug'] === $key ) ) {
+				return $name;
+			}
+		}
+		return null;
 	}
 
 	/**
