@@ -69,6 +69,45 @@ function formatDateOnly(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+// Search terms (it/en/de) used to pick the site pages most relevant to the
+// user's answers. Matched as prefixes by public.search_site_pages.
+const PAGE_TERMS: Record<string, string[]> = {
+  sport: ["sport", "bici", "cicl", "golf", "kart", "vela", "surf", "tennis", "padel", "palestr", "bike", "cycling", "rad", "segel"],
+  relax: ["spiaggia", "mare", "relax", "benesser", "beach", "sea", "strand", "meer", "erholung"],
+  culture: ["cultur", "museo", "mostra", "concert", "teatro", "storia", "arte", "museum", "exhibition", "theatre", "kultur", "ausstellung", "konzert"],
+  nightlife: ["locali", "discotec", "aperitiv", "notte", "musica", "nightlife", "club", "bar", "nachtleben", "musik"],
+  bleisure: ["coworking", "congress", "business", "lavoro", "meeting", "work", "kongress", "arbeit"],
+  lifestyle: ["shopping", "enogastronom", "vino", "spa", "wine", "food", "wein", "einkauf"],
+  trips: ["venezia", "laguna", "burano", "murano", "treviso", "escursion", "dintorni", "around", "venice", "lagoon", "excursion", "venedig", "lagune", "ausflug"],
+  pet: ["cani", "animali", "dog", "pet", "hund", "tiere"],
+  family: ["bambini", "famigli", "kids", "family", "kinder", "familie"],
+  christmas: ["natale", "natalizi", "presepe", "presepi", "villaggio", "christmas", "nativity", "weihnacht", "krippe"],
+};
+
+// Christmas season of natale.jesolo.it: 15 Nov – 15 Feb.
+function overlapsChristmasSeason(start: Date, end: Date): boolean {
+  for (let y = start.getFullYear() - 1; y <= end.getFullYear(); y++) {
+    const from = new Date(y, 10, 15);
+    const to = new Date(y + 1, 1, 15, 23, 59);
+    if (start <= to && end >= from) return true;
+  }
+  return false;
+}
+
+function buildPageSearchTerms(userData: UserData, start: Date, end: Date): string[] {
+  const terms = new Set<string>();
+  const add = (key: string) => (PAGE_TERMS[key] ?? []).forEach((t) => terms.add(t));
+  for (const i of userData.interests ?? []) add(i);
+  for (const extra of [...(userData.sports ?? []), ...(userData.eventTypes ?? []), ...(userData.lifestyle ?? [])]) {
+    if (extra && extra.length >= 3) terms.add(extra.toLowerCase());
+  }
+  if (userData.hasPet) add("pet");
+  if (/famil|kid|child|bambin/i.test(userData.travelGroup ?? "")) add("family");
+  if (overlapsChristmasSeason(start, end)) add("christmas");
+  if (!terms.size) ["jesolo", "spiaggia", "eventi", "beach", "events"].forEach((t) => terms.add(t));
+  return [...terms];
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -197,6 +236,28 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Official info pages (jesolo.it, natale.jesolo.it) and events listed on
+    // them. Optional context: a failure here must not block the plan.
+    const pageLang = (language || "it").split("-")[0].toLowerCase();
+    const [sitePagesResult, siteEventsResult] = await Promise.all([
+      supabase.rpc("search_site_pages", {
+        p_terms: buildPageSearchTerms(userData, start, end),
+        p_lang: pageLang,
+        p_limit: 6,
+      }),
+      supabase
+          .from("site_events")
+          .select("event_date,start_time,title,title_i18n,category_i18n,place_i18n,description_i18n,url,url_i18n,site")
+          .gte("event_date", startDateOnly)
+          .lte("event_date", endDateOnly)
+          .order("event_date", { ascending: true })
+          .limit(80),
+    ]);
+    if (sitePagesResult.error) console.error("search_site_pages:", sitePagesResult.error.message);
+    if (siteEventsResult.error) console.error("site_events:", siteEventsResult.error.message);
+    const sitePages = (sitePagesResult.data ?? []) as any[];
+    const siteEvents = (siteEventsResult.data ?? []) as any[];
+
     const themeNamesFor = (id: string): string[] =>
         (themesByEvent[id] ?? []).map((t) => t.name);
 
@@ -286,6 +347,22 @@ Deno.serve(async (req) => {
         summary: (establishment.excerpt || ""),
         url: establishment.link,
       })),
+      events_site: siteEvents.map((e: any) => ({
+        title: pickI18n(e.title_i18n, e.title),
+        date: e.event_date,
+        time: e.start_time ?? undefined,
+        category: pickI18n(e.category_i18n, null),
+        location: pickI18n(e.place_i18n, null),
+        description: pickI18n(e.description_i18n, null),
+        url: pickI18n(e.url_i18n, e.url),
+        source: e.site,
+      })),
+      site_pages: sitePages.map((p: any) => ({
+        title: p.title,
+        url: p.url,
+        source: p.site,
+        content: String(p.content ?? "").slice(0, 1500),
+      })),
     };
 
     const langName = language === "en" ? "English" : language === "de" ? "German" : "Italian";
@@ -312,6 +389,11 @@ Rules:
  - Whenever you recommend a bike tour from bike_tours, ALSO add a structured entry to that day's "events" array: title = the tour's exact title, url = its komoot url (verbatim), image = its image (verbatim, if present), location = a compact meta string built from its stats, e.g. "10 km · 1h30" or "23 km · 2h10 · gravel" (use distance_km and duration_min; format duration as "Xh" or "XhYY"; include category only when meaningful). OMIT the "time" field for bike tours.
  - Keep slot.content concise: do not repeat the event/tour name, url or image inside slot text — the card renders all of that. For a bike tour, the slot text should be a short narrative like "Pedalata mattutina lungo la laguna — vedi il tour consigliato qui sotto." and nothing more.
  - If an event has no specific start time, or its start time is 00:00, OMIT the "time" field entirely — the UI will label it as all-day.
+ - events_site lists official events published on the tourism websites (e.g. the Christmas programme of natale.jesolo.it). Treat them exactly like events_deskline: when you reference one, add it to that day's "events" array with title, time (only if present), location and url copied verbatim. They have no image: omit "image". If the same event appears in both lists, mention it once.
+
+OFFICIAL SITE PAGES (site_pages):
+ - site_pages contains excerpts of official pages from jesolo.it and natale.jesolo.it selected for this user's profile and dates. Use them as factual background (opening periods, places, what an attraction offers) and to suggest relevant attractions.
+ - Never contradict them and never add details they do not contain. Do not add site_pages entries to the "events" array; you may mention the attraction by name in the slot text.
 
 INTERESTS GLOSSARY (interpret userData.interests keys):
 - "sport": sports & outdoor (cycling, outdoor sports, water sports, golf, indoor fitness, karting). If userData.sports is provided, prioritise those sub-types.

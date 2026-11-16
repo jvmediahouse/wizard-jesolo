@@ -599,6 +599,102 @@ export type Database = {
           },
         ]
       }
+      site_events: {
+        Row: {
+          category_i18n: Json
+          created_at: string
+          description_i18n: Json
+          event_date: string
+          id: string
+          place_i18n: Json
+          site: string
+          start_time: string | null
+          synced_at: string
+          title: string
+          title_i18n: Json
+          updated_at: string
+          url: string | null
+          url_i18n: Json
+        }
+        Insert: {
+          category_i18n?: Json
+          created_at?: string
+          description_i18n?: Json
+          event_date: string
+          id: string
+          place_i18n?: Json
+          site: string
+          start_time?: string | null
+          synced_at?: string
+          title: string
+          title_i18n?: Json
+          updated_at?: string
+          url?: string | null
+          url_i18n?: Json
+        }
+        Update: {
+          category_i18n?: Json
+          created_at?: string
+          description_i18n?: Json
+          event_date?: string
+          id?: string
+          place_i18n?: Json
+          site?: string
+          start_time?: string | null
+          synced_at?: string
+          title?: string
+          title_i18n?: Json
+          updated_at?: string
+          url?: string | null
+          url_i18n?: Json
+        }
+        Relationships: []
+      }
+      site_pages: {
+        Row: {
+          content: string | null
+          created_at: string
+          external_id: string | null
+          id: string
+          lang: string
+          search: unknown
+          site: string
+          source_modified_at: string | null
+          synced_at: string
+          title: string
+          updated_at: string
+          url: string
+        }
+        Insert: {
+          content?: string | null
+          created_at?: string
+          external_id?: string | null
+          id: string
+          lang?: string
+          search?: unknown
+          site: string
+          source_modified_at?: string | null
+          synced_at?: string
+          title: string
+          updated_at?: string
+          url: string
+        }
+        Update: {
+          content?: string | null
+          created_at?: string
+          external_id?: string | null
+          id?: string
+          lang?: string
+          search?: unknown
+          site?: string
+          source_modified_at?: string | null
+          synced_at?: string
+          title?: string
+          updated_at?: string
+          url?: string
+        }
+        Relationships: []
+      }
       sync_log: {
         Row: {
           error: string | null
@@ -781,6 +877,17 @@ export type Database = {
           _user_id: string
         }
         Returns: boolean
+      }
+      search_site_pages: {
+        Args: { p_lang?: string; p_limit?: number; p_terms: string[] }
+        Returns: {
+          content: string
+          lang: string
+          rank: number
+          site: string
+          title: string
+          url: string
+        }[]
       }
     }
     Enums: {
