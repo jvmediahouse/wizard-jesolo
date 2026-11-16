@@ -1,7 +1,8 @@
 // Sync Jesolo tourism data. Idempotent via upsert. Two ways in:
 //
 // 1. Pull (pg_cron every 3 days, or a manual POST without a sync key):
-//    Deskline events + natale.jesolo.it pages and events. Reading jesolo.it
+//    Deskline events + natale.jesolo.it and lightson.jesolo.it pages and
+//    events. Reading jesolo.it
 //    (WordPress on SiteGround) from here is blocked by the host's anti-bot
 //    CAPTCHA, so that pull only runs when explicitly requested with
 //    {"include_wordpress": true}.
@@ -25,6 +26,10 @@ const WORDPRESS_SITE = "jesolo.it";
 const NATALE_SITE = "natale.jesolo.it";
 const NATALE_BASE = "https://natale.jesolo.it";
 const NATALE_MAX_PAGES = 80;
+const LIGHTSON_SITE = "lightson.jesolo.it";
+const LIGHTSON_BASE = "https://lightson.jesolo.it";
+// Legal pages of the content sites carry no tourist information.
+const EXCLUDED_PATHS = /(^|\/)(privacy|cookie)[^/]*$/i;
 // Pages shorter than this (after HTML stripping) carry no useful content.
 const MIN_PAGE_TEXT_LENGTH = 150;
 
@@ -1129,20 +1134,21 @@ const CONTENT_HEADERS = {
   "user-agent": "JesoloWizardSync/1.0",
 };
 
-function natalePathLang(path: string): "it" | "en" | "de" {
+function pathLang(path: string): "it" | "en" | "de" {
   if (path === "/en" || path.startsWith("/en/")) return "en";
   if (path === "/de" || path.startsWith("/de/")) return "de";
   return "it";
 }
 
-function extractInternalPaths(html: string): string[] {
+function extractInternalPaths(html: string, base: string): string[] {
   const out = new Set<string>();
   for (const m of html.matchAll(/href="([^"#?]*)"/g)) {
     let href = m[1];
-    if (href.startsWith(NATALE_BASE)) href = href.slice(NATALE_BASE.length) || "/";
+    if (href.startsWith(base)) href = href.slice(base.length) || "/";
     if (!href.startsWith("/") || href.startsWith("//")) continue;
     if (href.startsWith("/assets") || href.startsWith("/__")) continue;
     if (/\.[a-z0-9]{2,5}$/i.test(href)) continue; // files (png, css, xml…)
+    if (EXCLUDED_PATHS.test(href)) continue;
     out.add(href.length > 1 ? href.replace(/\/+$/, "") : href);
   }
   return [...out];
@@ -1153,43 +1159,47 @@ function pageTitle(html: string): string {
   return decodeAllEntities(t).replace(/\s*\|\s*Jesolo\.it\s*$/i, "").trim();
 }
 
-async function crawlNatale(): Promise<{ pages: PageInput[]; htmlByPath: Map<string, string> }> {
-  const queue = ["/", "/en", "/de"];
+// Reads a small static site from its start paths, following internal links.
+async function crawlSite(
+  base: string,
+  startPaths: string[],
+): Promise<{ pages: PageInput[]; htmlByPath: Map<string, string> }> {
+  const queue = [...startPaths];
   const seen = new Set<string>(queue);
   const pages: PageInput[] = [];
   const htmlByPath = new Map<string, string>();
 
   while (queue.length && htmlByPath.size < NATALE_MAX_PAGES) {
     const path = queue.shift()!;
-    const url = `${NATALE_BASE}${path === "/" ? "/" : path}`;
+    const url = `${base}${path === "/" ? "/" : path}`;
     let html: string;
     try {
       const res = await fetch(url, { headers: CONTENT_HEADERS });
       if (!res.ok) {
         await res.body?.cancel();
-        console.warn(`natale: ${path} → HTTP ${res.status}`);
+        console.warn(`${base}${path} → HTTP ${res.status}`);
         continue;
       }
       html = await res.text();
     } catch (err) {
-      console.warn(`natale: ${path} → ${errorMessage(err)}`);
+      console.warn(`${base}${path} → ${errorMessage(err)}`);
       continue;
     }
     htmlByPath.set(path, html);
     pages.push({
       url,
-      lang: natalePathLang(path),
+      lang: pathLang(path),
       title: pageTitle(html) || path,
       html,
     });
-    for (const next of extractInternalPaths(html)) {
+    for (const next of extractInternalPaths(html, base)) {
       if (!seen.has(next)) {
         seen.add(next);
         queue.push(next);
       }
     }
   }
-  if (!pages.length) throw new Error("natale.jesolo.it: no page could be read");
+  if (!pages.length) throw new Error(`${base}: no page could be read`);
   return { pages, htmlByPath };
 }
 
@@ -1321,11 +1331,163 @@ async function processNataleEvents(
       synced_at: syncedAt,
     });
   }
+  return saveSiteEvents(supabase, NATALE_SITE, rows, syncedAt);
+}
+
+// Upserts the full event list of a content site and drops the events the
+// site no longer lists.
+async function saveSiteEvents(
+  supabase: any,
+  site: string,
+  rows: Record<string, any>[],
+  syncedAt: string,
+): Promise<number> {
   const { error } = await supabase.from("site_events").upsert(rows, { onConflict: "id", defaultToNull: false });
   if (error) throw error;
-  const removed = await pruneStale(supabase, "site_events", NATALE_SITE, syncedAt);
-  console.log(`natale events: ${rows.length} upserted, ${removed} removed`);
+  const removed = await pruneStale(supabase, "site_events", site, syncedAt);
+  console.log(`${site} events: ${rows.length} upserted, ${removed} removed`);
   return rows.length;
+}
+
+// ---------- lightson.jesolo.it ----------
+// One-page site: section#programma lists one <article> per venue with name,
+// description (+ "Guest(s): 25 dic · Name, …"), optional note, rows of
+// dates per month ("Dic" + boxes "Sab 5") and links (website first).
+
+const WEEKDAYS: Record<string, number> = {
+  dom: 0, lun: 1, mar: 2, mer: 3, gio: 4, ven: 5, sab: 6,
+  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+};
+const SHORT_MONTHS: Record<string, number> = {
+  gen: 1, feb: 2, mar: 3, apr: 4, mag: 5, giu: 6, lug: 7, ago: 8, set: 9, ott: 10, nov: 11, dic: 12,
+  jan: 1, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, dec: 12,
+};
+
+type VenueRaw = {
+  name: string;
+  description: string;
+  note: string | null;
+  guests: Map<string, string>; // "MM-DD" → guest names
+  dates: { month: number; day: number; weekday: number | null }[];
+  url: string | null;
+};
+
+function plainText(html: string): string {
+  return decodeAllEntities(html.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, " "))
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .trim();
+}
+
+function parseLightsOnVenues(html: string): VenueRaw[] {
+  const start = html.indexOf('id="programma"');
+  if (start < 0) return [];
+  const section = html.slice(start, html.indexOf("</section>", start) + 1 || undefined);
+  const venues: VenueRaw[] = [];
+  for (const a of section.matchAll(/<article\b[\s\S]*?<\/article>/gi)) {
+    const art = a[0];
+    const name = plainText(art.match(/<h3\b[^>]*>([\s\S]*?)<\/h3>/i)?.[1] ?? "");
+    if (!name) continue;
+    const paragraphs = [...art.matchAll(/<p\b([^>]*)>([\s\S]*?)<\/p>/gi)];
+    const isMonthLabel = (attrs: string) => /tracking-widest/.test(attrs);
+    const textPs = paragraphs.filter((p) => !isMonthLabel(p[1])).map((p) => plainText(p[2]));
+    const [first = "", ...rest] = textPs;
+    const [descLine, ...guestLines] = first.split("\n");
+    const guests = new Map<string, string>();
+    for (const line of guestLines) {
+      const list = line.replace(/^guests?\s*:\s*/i, "");
+      // "25 dic · Name" (it) or "Dec 25 · Name" (en), comma-separated.
+      for (const part of list.split(/,\s*(?=\d|[\p{L}]{3}\.?\s+\d)/u)) {
+        const m = part.match(/^(?:(\d{1,2})\s+([\p{L}]+)|([\p{L}]+)\.?\s+(\d{1,2}))\.?\s*·\s*(.+)$/u);
+        if (!m) continue;
+        const day = m[1] ?? m[4];
+        const month = SHORT_MONTHS[(m[2] ?? m[3]).toLowerCase().slice(0, 3)];
+        if (month) guests.set(`${String(month).padStart(2, "0")}-${day.padStart(2, "0")}`, m[5].trim());
+      }
+    }
+    // Month rows: a label <p> followed by its day boxes.
+    const dates: VenueRaw["dates"] = [];
+    const rowRe = /<p\b[^>]*tracking-widest[^>]*>\s*([\p{L}]+)\s*<\/p>([\s\S]*?)(?=<p\b[^>]*tracking-widest|<a\b|$)/giu;
+    for (const row of art.matchAll(rowRe)) {
+      const month = SHORT_MONTHS[row[1].toLowerCase().slice(0, 3)];
+      if (!month) continue;
+      for (const d of row[2].matchAll(/<span\b[^>]*>\s*([\p{L}]+)\s*<\/span>\s*<span\b[^>]*>\s*(\d{1,2})\s*<\/span>/giu)) {
+        dates.push({ month, day: Number(d[2]), weekday: WEEKDAYS[d[1].toLowerCase().slice(0, 3)] ?? null });
+      }
+    }
+    const url = art.match(/<a\b[^>]*href="(https?:[^"]+)"/i)?.[1] ?? null;
+    venues.push({
+      name,
+      description: descLine.trim(),
+      note: rest.filter(Boolean).join(" ") || null,
+      guests,
+      dates,
+      url: url ? decodeAllEntities(url) : null,
+    });
+  }
+  return venues;
+}
+
+// The programme shows day/month/weekday but no year: pick the year (around
+// today) whose calendar matches the weekday shown.
+function resolveYear(month: number, day: number, weekday: number | null, today = new Date()): number {
+  const y = today.getUTCFullYear();
+  const candidates = [y, y + 1, y - 1];
+  if (weekday != null) {
+    const match = candidates.find((c) => new Date(Date.UTC(c, month - 1, day)).getUTCDay() === weekday);
+    if (match) return match;
+  }
+  // No weekday: the season runs Dec–Jan, so January belongs to next year.
+  return month < 6 && today.getUTCMonth() >= 6 ? y + 1 : y;
+}
+
+async function processLightsOnEvents(
+  supabase: any,
+  htmlByPath: Map<string, string>,
+  syncedAt: string,
+): Promise<number> {
+  const itHtml = htmlByPath.get("/");
+  if (!itHtml) throw new Error("lightson.jesolo.it home page not read");
+  const itVenues = parseLightsOnVenues(itHtml);
+  const dateCount = itVenues.reduce((n, v) => n + v.dates.length, 0);
+  if (!dateCount) throw new Error("lightson.jesolo.it: no dates parsed (page layout changed?)");
+
+  const enHtml = htmlByPath.get("/en");
+  const enVenues = enHtml ? parseLightsOnVenues(enHtml) : [];
+  const en = enVenues.length === itVenues.length ? enVenues : null;
+  if (enHtml && !en) console.warn(`lightson: en has ${enVenues.length} venues vs ${itVenues.length} in it — skipping en texts`);
+
+  const rows: Record<string, any>[] = [];
+  const seen = new Set<string>();
+  for (let v = 0; v < itVenues.length; v++) {
+    const it = itVenues[v];
+    const enV = en?.[v];
+    for (const d of it.dates) {
+      const year = resolveYear(d.month, d.day, d.weekday);
+      const date = `${year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`;
+      const guest = it.guests.get(date.slice(5));
+      const id = await stableId(LIGHTSON_SITE, date, it.name.toLowerCase());
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const describe = (x: VenueRaw) => [x.description, x.note].filter(Boolean).join(" ");
+      const title = (x: VenueRaw) => (guest ? `${x.name} · ${x.guests.get(date.slice(5)) ?? guest}` : x.name);
+      rows.push({
+        id,
+        site: LIGHTSON_SITE,
+        event_date: date,
+        start_time: null,
+        title: title(it),
+        title_i18n: enV ? { it: title(it), en: title(enV) } : { it: title(it) },
+        category_i18n: { it: "Lights On · serate e Capodanno", en: "Lights On · nights and New Year's Eve" },
+        place_i18n: { it: it.name, en: enV?.name ?? it.name },
+        description_i18n: enV ? { it: describe(it), en: describe(enV) } : { it: describe(it) },
+        url: it.url ?? `${LIGHTSON_BASE}/`,
+        url_i18n: { it: it.url ?? `${LIGHTSON_BASE}/`, en: enV?.url ?? it.url ?? `${LIGHTSON_BASE}/en` },
+        synced_at: syncedAt,
+      });
+    }
+  }
+  return saveSiteEvents(supabase, LIGHTSON_SITE, rows, syncedAt);
 }
 
 // ---------- PUSH from the WordPress plugin ----------
@@ -1439,6 +1601,7 @@ Deno.serve(async (req) => {
   const results: Record<string, any> = {};
   const runStartedAt = new Date().toISOString();
   let nataleHtml: Map<string, string> | null = null;
+  let lightsonHtml: Map<string, string> | null = null;
 
   const sources: Array<[string, () => Promise<number>]> = [];
   if (options?.include_wordpress === true) {
@@ -1468,7 +1631,7 @@ Deno.serve(async (req) => {
   }
   sources.push(
     [`pages:${NATALE_SITE}`, async () => {
-      const { pages, htmlByPath } = await crawlNatale();
+      const { pages, htmlByPath } = await crawlSite(NATALE_BASE, ["/", "/en", "/de"]);
       nataleHtml = htmlByPath;
       const count = await processSitePages(supabase, NATALE_SITE, pages, runStartedAt);
       const removed = await pruneStale(supabase, "site_pages", NATALE_SITE, runStartedAt);
@@ -1478,6 +1641,18 @@ Deno.serve(async (req) => {
     [`events:${NATALE_SITE}`, () => {
       if (!nataleHtml) throw new Error("natale.jesolo.it pages were not read");
       return processNataleEvents(supabase, nataleHtml, runStartedAt);
+    }],
+    [`pages:${LIGHTSON_SITE}`, async () => {
+      const { pages, htmlByPath } = await crawlSite(LIGHTSON_BASE, ["/", "/en"]);
+      lightsonHtml = htmlByPath;
+      const count = await processSitePages(supabase, LIGHTSON_SITE, pages, runStartedAt);
+      const removed = await pruneStale(supabase, "site_pages", LIGHTSON_SITE, runStartedAt);
+      console.log(`lightson pages: ${count} stored, ${removed} removed`);
+      return count;
+    }],
+    [`events:${LIGHTSON_SITE}`, () => {
+      if (!lightsonHtml) throw new Error("lightson.jesolo.it pages were not read");
+      return processLightsOnEvents(supabase, lightsonHtml, runStartedAt);
     }],
     ["deskline_events", () => syncDeskline(supabase)],
   );
