@@ -1,15 +1,32 @@
-// Sync Jesolo tourism data: Tribe Events, WP sports/activities, Deskline events
-// Runs daily via pg_cron, idempotent via upsert.
+// Sync Jesolo tourism data. Idempotent via upsert. Two ways in:
+//
+// 1. Pull (pg_cron every 3 days, or a manual POST without a sync key):
+//    Deskline events + natale.jesolo.it pages and events. Reading jesolo.it
+//    (WordPress on SiteGround) from here is blocked by the host's anti-bot
+//    CAPTCHA, so that pull only runs when explicitly requested with
+//    {"include_wordpress": true}.
+// 2. Push (POST with header x-wizard-sync-key): the WordPress plugin
+//    "Jesolo Wizard Sync" installed on jesolo.it sends its own data
+//    (events, categories, facilities, activities, bike pages, beaches, pages).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+    "authorization, x-client-info, apikey, content-type, x-wizard-sync-key",
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// Shared secret with the WordPress plugin (Edge Functions → Secrets).
+const WP_SYNC_KEY = Deno.env.get("WP_SYNC_KEY")?.trim() || null;
+
+const WORDPRESS_SITE = "jesolo.it";
+const NATALE_SITE = "natale.jesolo.it";
+const NATALE_BASE = "https://natale.jesolo.it";
+const NATALE_MAX_PAGES = 80;
+// Pages shorter than this (after HTML stripping) carry no useful content.
+const MIN_PAGE_TEXT_LENGTH = 150;
 
 const TRIBE_EVENTS_URL = "https://www.jesolo.it/wp-json/tribe/events/v1/events";
 const TRIBE_CATEGORIES_URL =
@@ -26,9 +43,12 @@ const ACTIVITY_CATEGORIES_URL =
 const BIKE_ROUTES_URL = "https://jesolo.it/wp-json/wp/v2/pages?parent=1963";
 const BEACH_ESTABLISHMENTS_URL = "https://jesolo.it/wp-json/wp/v2/stabilimenti";
 
+// Plain product token, as tested with SiteGround support (Nov 2026): the
+// "Mozilla/5.0 (compatible; ...)" form is dropped before reaching the site
+// (connection reset, nothing in the server logs), the plain form gets 200.
 const WORDPRESS_HEADERS = {
   "accept": "application/json, text/plain, */*",
-  "user-agent": "Mozilla/5.0 (compatible; JesoloWizardSync/1.0)",
+  "user-agent": "JesoloWizardSync/1.0",
 };
 
 const DESKLINE_BASE_ROOT = "https://webapi.deskline.net/jesolo";
@@ -213,6 +233,11 @@ function extractBikeTours(
 async function syncBikeTours(supabase: any): Promise<number> {
   // Fetch the 3 parent pages with full content (no _embed needed)
   const pages = await fetchJson(`${BIKE_ROUTES_URL}&per_page=50&page=1`);
+  return processBikeTours(supabase, pages);
+}
+
+// `pages`: WP REST page objects (content.rendered, slug, id) under /cicloturismo/.
+async function processBikeTours(supabase: any, pages: any): Promise<number> {
   if (!Array.isArray(pages) || !pages.length) return 0;
 
   const allTours: any[] = [];
@@ -412,7 +437,11 @@ async function syncTribeCategories(supabase: any) {
     if (cats.length < 100) break;
     page++;
   }
-  if (!all.length) return 0;
+  return processTribeCategories(supabase, all);
+}
+
+async function processTribeCategories(supabase: any, all: any[]) {
+  if (!Array.isArray(all) || !all.length) return 0;
   const rows = all.map((c) => ({
     id: c.id,
     name: c.name,
@@ -425,8 +454,6 @@ async function syncTribeCategories(supabase: any) {
 
 async function syncTribeEvents(supabase: any) {
   const allEvents: any[] = [];
-  const venuesMap = new Map<number, any>();
-  const eventCats: { event_id: number; category_id: number }[] = [];
   let page = 1;
   while (page < 50) {
     const d = await fetchJson(
@@ -440,6 +467,14 @@ async function syncTribeEvents(supabase: any) {
     if (evs.length < 50) break;
     page++;
   }
+  return processTribeEvents(supabase, allEvents);
+}
+
+// `allEvents`: Tribe REST event objects (tribe/events/v1/events → events[]).
+async function processTribeEvents(supabase: any, allEvents: any[]) {
+  if (!Array.isArray(allEvents)) return 0;
+  const venuesMap = new Map<number, any>();
+  const eventCats: { event_id: number; category_id: number }[] = [];
 
   for (const e of allEvents) {
     if (e.venue && e.venue.id) {
@@ -518,7 +553,12 @@ async function syncWpCategories(supabase: any, url: string, table: string) {
     if (d.length < 100) break;
     page++;
   }
-  if (!all.length) return 0;
+  return processWpCategories(supabase, all, table);
+}
+
+// `all`: taxonomy terms ({ id, name, slug }).
+async function processWpCategories(supabase: any, all: any[], table: string) {
+  if (!Array.isArray(all) || !all.length) return 0;
   const rows = all.map((c) => ({ id: c.id, name: c.name, slug: c.slug }));
   await mergeUpsert(supabase, table, rows, "id");
   return rows.length;
@@ -536,7 +576,6 @@ async function syncWpItems(
   table: string,
   options: WpSyncOptions = {},
 ) {
-  const { joinTable, fkCol, taxKey } = options;
   const all: any[] = [];
   let page = 1;
   const sep = url.includes("?") ? "&" : "?";
@@ -547,7 +586,18 @@ async function syncWpItems(
     if (d.length < 50) break;
     page++;
   }
-  if (!all.length) return 0;
+  return processWpItems(supabase, all, table, options);
+}
+
+// `all`: WP REST post objects, embedded (_embed) for the featured image.
+async function processWpItems(
+  supabase: any,
+  all: any[],
+  table: string,
+  options: WpSyncOptions = {},
+) {
+  const { joinTable, fkCol, taxKey } = options;
+  if (!Array.isArray(all) || !all.length) return 0;
 
   const rows = all.map((it) => ({
     id: it.id,
@@ -955,61 +1005,482 @@ async function syncDeskline(supabase: any) {
   return eventRows.length;
 }
 
+// ---------- CONTENT PAGES (jesolo.it via plugin, natale.jesolo.it via crawl) ----------
+
+type PageInput = {
+  external_id?: string | number | null;
+  url: string;
+  lang?: string | null;
+  title: string;
+  html?: string | null;
+  text?: string | null;
+  modified?: string | null;
+};
+
+function decodeAllEntities(s: string): string {
+  return decodeHtmlEntities(s)
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&apos;/g, "'")
+    .replace(/&rsquo;|&lsquo;/g, "'")
+    .replace(/&rdquo;|&ldquo;/g, '"')
+    .replace(/&hellip;/g, "…")
+    .replace(/&ndash;/g, "–")
+    .replace(/&mdash;/g, "—")
+    .replace(/&euro;/g, "€");
+}
+
+// HTML → readable plain text: drops scripts, styles, navigation and footer,
+// keeps paragraph/heading/list breaks.
+function htmlToText(html: string): string {
+  const cleaned = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|svg|template|iframe)\b[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<(head|header|footer|nav)\b[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|section|article|h[1-6]|li|ul|ol|tr|table|blockquote)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  return decodeAllEntities(cleaned)
+    .split("\n")
+    .map((line) => line.replace(/[ \t ]+/g, " ").trim())
+    .filter((line) => line.length > 0)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeLang(lang?: string | null): string {
+  const l = (lang ?? "it").toLowerCase().slice(0, 2);
+  return /^[a-z]{2}$/.test(l) ? l : "it";
+}
+
+async function processSitePages(
+  supabase: any,
+  site: string,
+  pages: PageInput[],
+  syncedAt: string,
+): Promise<number> {
+  if (!Array.isArray(pages) || !pages.length) return 0;
+  const rows: Record<string, any>[] = [];
+  const seen = new Set<string>();
+  for (const p of pages) {
+    if (!p?.url || !p?.title) continue;
+    const text = p.text?.trim() || (p.html ? htmlToText(p.html) : "");
+    if (text.length < MIN_PAGE_TEXT_LENGTH) continue;
+    const lang = normalizeLang(p.lang);
+    let key = p.external_id != null ? String(p.external_id) : "";
+    if (!key) {
+      try {
+        key = new URL(p.url).pathname;
+      } catch {
+        key = p.url;
+      }
+    }
+    const id = `${site}:${lang}:${key}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const modified = p.modified ? new Date(p.modified) : null;
+    rows.push({
+      id,
+      site,
+      lang,
+      url: p.url,
+      title: decodeAllEntities(stripHtml(p.title) ?? p.title).trim(),
+      content: text,
+      external_id: p.external_id != null ? String(p.external_id) : null,
+      source_modified_at: modified && !Number.isNaN(modified.getTime())
+        ? modified.toISOString()
+        : null,
+      synced_at: syncedAt,
+    });
+  }
+  if (!rows.length) return 0;
+  // Pages are fully re-sent each run: plain upsert (no merge needed).
+  for (let i = 0; i < rows.length; i += 50) {
+    const { error } = await supabase
+      .from("site_pages")
+      .upsert(rows.slice(i, i + 50), { onConflict: "id", defaultToNull: false });
+    if (error) throw error;
+  }
+  return rows.length;
+}
+
+// Removes pages of `site` not refreshed by the run that started at `runStartedAt`
+// (deleted or unpublished at the source).
+async function pruneStale(
+  supabase: any,
+  table: "site_pages" | "site_events",
+  site: string,
+  runStartedAt: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from(table)
+    .delete()
+    .eq("site", site)
+    .lt("synced_at", runStartedAt)
+    .select("id");
+  if (error) throw error;
+  return (data ?? []).length;
+}
+
+// ---------- natale.jesolo.it ----------
+
+const CONTENT_HEADERS = {
+  "accept": "text/html,application/xhtml+xml",
+  "user-agent": "JesoloWizardSync/1.0",
+};
+
+function natalePathLang(path: string): "it" | "en" | "de" {
+  if (path === "/en" || path.startsWith("/en/")) return "en";
+  if (path === "/de" || path.startsWith("/de/")) return "de";
+  return "it";
+}
+
+function extractInternalPaths(html: string): string[] {
+  const out = new Set<string>();
+  for (const m of html.matchAll(/href="([^"#?]*)"/g)) {
+    let href = m[1];
+    if (href.startsWith(NATALE_BASE)) href = href.slice(NATALE_BASE.length) || "/";
+    if (!href.startsWith("/") || href.startsWith("//")) continue;
+    if (href.startsWith("/assets") || href.startsWith("/__")) continue;
+    if (/\.[a-z0-9]{2,5}$/i.test(href)) continue; // files (png, css, xml…)
+    out.add(href.length > 1 ? href.replace(/\/+$/, "") : href);
+  }
+  return [...out];
+}
+
+function pageTitle(html: string): string {
+  const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
+  return decodeAllEntities(t).replace(/\s*\|\s*Jesolo\.it\s*$/i, "").trim();
+}
+
+async function crawlNatale(): Promise<{ pages: PageInput[]; htmlByPath: Map<string, string> }> {
+  const queue = ["/", "/en", "/de"];
+  const seen = new Set<string>(queue);
+  const pages: PageInput[] = [];
+  const htmlByPath = new Map<string, string>();
+
+  while (queue.length && htmlByPath.size < NATALE_MAX_PAGES) {
+    const path = queue.shift()!;
+    const url = `${NATALE_BASE}${path === "/" ? "/" : path}`;
+    let html: string;
+    try {
+      const res = await fetch(url, { headers: CONTENT_HEADERS });
+      if (!res.ok) {
+        await res.body?.cancel();
+        console.warn(`natale: ${path} → HTTP ${res.status}`);
+        continue;
+      }
+      html = await res.text();
+    } catch (err) {
+      console.warn(`natale: ${path} → ${errorMessage(err)}`);
+      continue;
+    }
+    htmlByPath.set(path, html);
+    pages.push({
+      url,
+      lang: natalePathLang(path),
+      title: pageTitle(html) || path,
+      html,
+    });
+    for (const next of extractInternalPaths(html)) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  if (!pages.length) throw new Error("natale.jesolo.it: no page could be read");
+  return { pages, htmlByPath };
+}
+
+const MONTHS: Record<string, number> = {
+  gennaio: 1, febbraio: 2, marzo: 3, aprile: 4, maggio: 5, giugno: 6,
+  luglio: 7, agosto: 8, settembre: 9, ottobre: 10, novembre: 11, dicembre: 12,
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7,
+  august: 8, september: 9, october: 10, november: 11, december: 12,
+  januar: 1, februar: 2, märz: 3, maerz: 3, mai: 5, juni: 6, juli: 7,
+  oktober: 10, dezember: 12,
+};
+
+function parseLongDate(s: string): string | null {
+  const m = s.match(/(\d{1,2})\.?\s+([\p{L}]+)\s+(\d{4})/u);
+  if (!m) return null;
+  const month = MONTHS[m[2].toLowerCase()];
+  if (!month) return null;
+  return `${m[3]}-${String(month).padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+}
+
+function parseTime(s: string): string | null {
+  const m = s.match(/(\d{1,2})[.:](\d{2})/);
+  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : null;
+}
+
+type NataleEventRaw = {
+  date: string | null;
+  time: string | null;
+  category: string | null;
+  title: string;
+  place: string | null;
+  description: string | null;
+};
+
+// Parses the event list of natale.jesolo.it/eventi: each <li> has a left
+// column (date span, optional "ore 10.00", category) and a right column
+// (title span, place, optional description).
+function parseNataleEvents(html: string): NataleEventRaw[] {
+  const out: NataleEventRaw[] = [];
+  for (const li of html.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)) {
+    const cols = [...li[1].matchAll(/<div\b[^>]*>([\s\S]*?)<\/div>/gi)].map((c) => c[1]);
+    if (cols.length < 2) continue;
+    const [left, right] = cols;
+    const text = (s?: string) => (s ? decodeAllEntities(s.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim() : "");
+    const leftSpan = text(left.match(/<span\b[^>]*>([\s\S]*?)<\/span>/i)?.[1]);
+    const date = parseLongDate(leftSpan);
+    if (!date) continue;
+    const leftPs = [...left.matchAll(/<p\b([^>]*)>([\s\S]*?)<\/p>/gi)];
+    let time: string | null = null;
+    let category: string | null = null;
+    for (const p of leftPs) {
+      const value = text(p[2]);
+      const t = /\d{1,2}[.:]\d{2}/.test(value) ? parseTime(value) : null;
+      if (t && !time) time = t;
+      else if (!category && value) category = value;
+    }
+    const title = text(right.match(/<span\b[^>]*>([\s\S]*?)<\/span>/i)?.[1]);
+    if (!title) continue;
+    const rightPs = [...right.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)].map((p) => text(p[1]));
+    out.push({
+      date,
+      time,
+      category,
+      title,
+      place: rightPs[0] || null,
+      description: rightPs.slice(1).join(" ") || null,
+    });
+  }
+  return out;
+}
+
+async function stableId(...parts: string[]): Promise<string> {
+  const data = new TextEncoder().encode(parts.join("|"));
+  const digest = await crypto.subtle.digest("SHA-1", data);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 24);
+}
+
+async function processNataleEvents(
+  supabase: any,
+  htmlByPath: Map<string, string>,
+  syncedAt: string,
+): Promise<number> {
+  const itHtml = htmlByPath.get("/eventi");
+  if (!itHtml) throw new Error("natale.jesolo.it/eventi not found");
+  const itEvents = parseNataleEvents(itHtml);
+  if (!itEvents.length) throw new Error("natale.jesolo.it/eventi: no events parsed (page layout changed?)");
+
+  // EN/DE pages list the same events in the same order: pair them by index
+  // only when the counts match.
+  const translated: Record<string, NataleEventRaw[] | null> = {};
+  for (const lang of ["en", "de"]) {
+    const h = htmlByPath.get(`/${lang}/eventi`);
+    const evs = h ? parseNataleEvents(h) : [];
+    translated[lang] = evs.length === itEvents.length ? evs : null;
+    if (h && !translated[lang]) {
+      console.warn(`natale events: ${lang} list has ${evs.length} items vs ${itEvents.length} in it — skipping ${lang} texts`);
+    }
+  }
+
+  const rows: Record<string, any>[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < itEvents.length; i++) {
+    const e = itEvents[i];
+    const id = await stableId(NATALE_SITE, e.date!, e.time ?? "", e.title.toLowerCase());
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const i18n = (pick: (x: NataleEventRaw) => string | null) => {
+      const o: Record<string, string> = {};
+      const it = pick(e);
+      if (it) o.it = it;
+      for (const lang of ["en", "de"]) {
+        const v = translated[lang] ? pick(translated[lang]![i]) : null;
+        if (v) o[lang] = v;
+      }
+      return o;
+    };
+    rows.push({
+      id,
+      site: NATALE_SITE,
+      event_date: e.date,
+      start_time: e.time,
+      title: e.title,
+      title_i18n: i18n((x) => x.title),
+      category_i18n: i18n((x) => x.category),
+      place_i18n: i18n((x) => x.place),
+      description_i18n: i18n((x) => x.description),
+      url: `${NATALE_BASE}/eventi`,
+      url_i18n: { it: `${NATALE_BASE}/eventi`, en: `${NATALE_BASE}/en/eventi`, de: `${NATALE_BASE}/de/eventi` },
+      synced_at: syncedAt,
+    });
+  }
+  const { error } = await supabase.from("site_events").upsert(rows, { onConflict: "id", defaultToNull: false });
+  if (error) throw error;
+  const removed = await pruneStale(supabase, "site_events", NATALE_SITE, syncedAt);
+  console.log(`natale events: ${rows.length} upserted, ${removed} removed`);
+  return rows.length;
+}
+
+// ---------- PUSH from the WordPress plugin ----------
+
+function timingSafeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  let diff = ea.length ^ eb.length;
+  for (let i = 0; i < Math.max(ea.length, eb.length); i++) {
+    diff |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+const PUSH_HANDLERS: Record<string, (supabase: any, items: any[], syncedAt: string) => Promise<number>> = {
+  tribe_categories: (s, items) => processTribeCategories(s, items),
+  tribe_events: (s, items) => processTribeEvents(s, items),
+  sports_categories: (s, items) => processWpCategories(s, items, "sports_facility_categories"),
+  sports_facilities: (s, items) =>
+    processWpItems(s, items, "sports_facilities", {
+      joinTable: "sports_facility_to_category",
+      fkCol: "facility_id",
+      taxKey: "categoria_strutture_sportive",
+    }),
+  activity_categories: (s, items) => processWpCategories(s, items, "activity_categories"),
+  activities: (s, items) =>
+    processWpItems(s, items, "activities", {
+      joinTable: "activity_to_category",
+      fkCol: "activity_id",
+      taxKey: "attivita-jesolo-category",
+    }),
+  bike_pages: async (s, items) => {
+    const routes = await processWpItems(s, items, "bike_routes");
+    const tours = await processBikeTours(s, items);
+    console.log(`bike_pages: ${routes} routes, ${tours} tours`);
+    return tours;
+  },
+  beach_establishments: (s, items) => processWpItems(s, items, "beach_establishments"),
+  pages: (s, items, syncedAt) => processSitePages(s, WORDPRESS_SITE, items, syncedAt),
+};
+
+async function handlePush(req: Request, supabase: any, providedKey: string): Promise<Response> {
+  if (!WP_SYNC_KEY) return json({ ok: false, error: "WP_SYNC_KEY is not configured on Supabase" }, 503);
+  if (!timingSafeEqual(providedKey.trim(), WP_SYNC_KEY)) return json({ ok: false, error: "Invalid sync key" }, 401);
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+  const kind = String(body?.kind ?? "");
+  if (kind === "ping") return json({ ok: true, message: "Connection OK" });
+
+  const handler = PUSH_HANDLERS[kind];
+  if (!handler) return json({ ok: false, error: `Unknown kind: ${kind}` }, 400);
+  const items = Array.isArray(body?.items) ? body.items : null;
+  if (!items) return json({ ok: false, error: "items must be an array" }, 400);
+
+  // All batches of one plugin run share run_started_at, so pages not
+  // re-sent by that run can be pruned when the last batch arrives.
+  const runStartedAt = typeof body?.run_started_at === "string" && !Number.isNaN(Date.parse(body.run_started_at))
+    ? new Date(body.run_started_at).toISOString()
+    : new Date().toISOString();
+  const source = kind === "pages" ? `pages:${WORDPRESS_SITE}` : kind;
+  const started = new Date().toISOString();
+  try {
+    const count = await handler(supabase, items, runStartedAt);
+    let removed = 0;
+    if (kind === "pages" && body?.final === true) {
+      removed = await pruneStale(supabase, "site_pages", WORDPRESS_SITE, runStartedAt);
+    }
+    // Pages arrive in several batches: log only the last one.
+    if (kind !== "pages" || body?.final === true) {
+      await logSync(supabase, `push:${source}`, "success", count, null, started);
+    }
+    return json({ ok: true, kind, count, removed });
+  } catch (e) {
+    const msg = errorMessage(e);
+    console.error(`Push ${kind} failed:`, msg);
+    await logSync(supabase, `push:${source}`, "error", 0, msg, started);
+    return json({ ok: false, kind, error: msg }, 500);
+  }
+}
+
+// ---------- ENTRYPOINT ----------
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
+  const pushKey = req.headers.get("x-wizard-sync-key");
+  if (pushKey !== null) return handlePush(req, supabase, pushKey);
+
+  let options: any = {};
+  try {
+    options = await req.json();
+  } catch {
+    // cron / manual calls may have no body
+  }
+
   const results: Record<string, any> = {};
-  const sources: Array<[string, () => Promise<number>]> = [
-    ["tribe_categories", () => syncTribeCategories(supabase)],
-    ["tribe_events", () => syncTribeEvents(supabase)],
-    [
-      "sports_categories",
-      () =>
-        syncWpCategories(
-          supabase,
-          SPORTS_CATEGORIES_URL,
-          "sports_facility_categories",
-        ),
-    ],
-    [
-      "sports_facilities",
-      () =>
+  const runStartedAt = new Date().toISOString();
+  let nataleHtml: Map<string, string> | null = null;
+
+  const sources: Array<[string, () => Promise<number>]> = [];
+  if (options?.include_wordpress === true) {
+    // Legacy pull from jesolo.it — normally blocked by SiteGround's CAPTCHA;
+    // the WordPress plugin pushes this data instead.
+    sources.push(
+      ["tribe_categories", () => syncTribeCategories(supabase)],
+      ["tribe_events", () => syncTribeEvents(supabase)],
+      ["sports_categories", () => syncWpCategories(supabase, SPORTS_CATEGORIES_URL, "sports_facility_categories")],
+      ["sports_facilities", () =>
         syncWpItems(supabase, SPORTS_FACILITIES_URL, "sports_facilities", {
           joinTable: "sports_facility_to_category",
           fkCol: "facility_id",
           taxKey: "categoria_strutture_sportive",
-        }),
-    ],
-    [
-      "activity_categories",
-      () =>
-        syncWpCategories(
-          supabase,
-          ACTIVITY_CATEGORIES_URL,
-          "activity_categories",
-        ),
-    ],
-    ["activities", () =>
-      syncWpItems(supabase, ACTIVITIES_URL, "activities", {
-        joinTable: "activity_to_category",
-        fkCol: "activity_id",
-        taxKey: "attivita-jesolo-category",
-      })],
-    [
-      "bike_routes",
-      () => syncWpItems(supabase, BIKE_ROUTES_URL, "bike_routes"),
-    ],
-    ["bike_tours", () => syncBikeTours(supabase)],
-    [
-      "beach_establishments",
-      () =>
-        syncWpItems(supabase, BEACH_ESTABLISHMENTS_URL, "beach_establishments"),
-    ],
+        })],
+      ["activity_categories", () => syncWpCategories(supabase, ACTIVITY_CATEGORIES_URL, "activity_categories")],
+      ["activities", () =>
+        syncWpItems(supabase, ACTIVITIES_URL, "activities", {
+          joinTable: "activity_to_category",
+          fkCol: "activity_id",
+          taxKey: "attivita-jesolo-category",
+        })],
+      ["bike_routes", () => syncWpItems(supabase, BIKE_ROUTES_URL, "bike_routes")],
+      ["bike_tours", () => syncBikeTours(supabase)],
+      ["beach_establishments", () => syncWpItems(supabase, BEACH_ESTABLISHMENTS_URL, "beach_establishments")],
+    );
+  }
+  sources.push(
+    [`pages:${NATALE_SITE}`, async () => {
+      const { pages, htmlByPath } = await crawlNatale();
+      nataleHtml = htmlByPath;
+      const count = await processSitePages(supabase, NATALE_SITE, pages, runStartedAt);
+      const removed = await pruneStale(supabase, "site_pages", NATALE_SITE, runStartedAt);
+      console.log(`natale pages: ${count} stored, ${removed} removed`);
+      return count;
+    }],
+    [`events:${NATALE_SITE}`, () => {
+      if (!nataleHtml) throw new Error("natale.jesolo.it pages were not read");
+      return processNataleEvents(supabase, nataleHtml, runStartedAt);
+    }],
     ["deskline_events", () => syncDeskline(supabase)],
-  ];
+  );
 
   for (const [name, fn] of sources) {
     const started = new Date().toISOString();
@@ -1025,8 +1496,5 @@ Deno.serve(async (req) => {
     }
   }
 
-  return new Response(JSON.stringify({ ok: true, results }), {
-    status: 200,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  return json({ ok: true, results });
 });

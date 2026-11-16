@@ -40,7 +40,7 @@ export function EventsScreen({ step, selectedDate, onSelectDate, onContinue }: E
         const windowEnd = new Date(today.getTime() + 1000 * 60 * 60 * 24 * 180);
         const windowEndDateOnly = windowEnd.toISOString().slice(0, 10);
 
-        const [{ data: tribe }, { data: desklineBase }, { data: occurrences }] = await Promise.all([
+        const [{ data: tribe }, { data: desklineBase }, { data: occurrences }, { data: siteEvents }] = await Promise.all([
           supabase.from('events')
             .select('id,title,description,start_date,url,image_url,venues(name,city)')
             .gte('start_date', todayISO)
@@ -57,6 +57,13 @@ export function EventsScreen({ step, selectedDate, onSelectDate, onContinue }: E
             .lte('occurrence_date', windowEndDateOnly)
             .order('occurrence_date', { ascending: true })
             .limit(200),
+          // Events listed on content sites (e.g. natale.jesolo.it/eventi)
+          supabase.from('site_events')
+            .select('id,event_date,start_time,title,title_i18n,place_i18n,description_i18n,url,url_i18n')
+            .gte('event_date', todayDateOnly)
+            .lte('event_date', windowEndDateOnly)
+            .order('event_date', { ascending: true })
+            .limit(100),
         ]);
 
         const occEventIds = new Set((occurrences ?? []).map((o: any) => o.event_id));
@@ -128,7 +135,22 @@ export function EventsScreen({ step, selectedDate, onSelectDate, onContinue }: E
           })
           .filter((e: JesoloEvent) => !tribeKeys.has(`${norm(e.title)}|${dayKey(e.date)}`));
 
-        const merged: JesoloEvent[] = [...tribeItems, ...occItems, ...baseItems]
+        // Lowest priority: skip site events already listed by Tribe/Deskline
+        const takenKeys = new Set(
+          [...tribeItems, ...occItems, ...baseItems].map(e => `${norm(e.title)}|${dayKey(e.date)}`),
+        );
+        const siteItems: JesoloEvent[] = (siteEvents ?? [])
+          .map((e: any) => ({
+            id: `s-${e.id}`,
+            title: decodeHtmlEntities(pickI18n(e.title_i18n, e.title) ?? ''),
+            date: e.event_date,
+            description: decodeHtmlEntities((pickI18n(e.description_i18n, '') ?? '').slice(0, 220)),
+            location: pickI18n(e.place_i18n, null) || 'Jesolo',
+            url: pickI18n(e.url_i18n, e.url) ?? undefined,
+          }))
+          .filter((e: JesoloEvent) => e.title && !takenKeys.has(`${norm(e.title)}|${dayKey(e.date)}`));
+
+        const merged: JesoloEvent[] = [...tribeItems, ...occItems, ...baseItems, ...siteItems]
           .filter(e => e.date)
           .sort((a, b) => parseISO(a.date).getTime() - parseISO(b.date).getTime());
 
