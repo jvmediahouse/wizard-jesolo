@@ -114,8 +114,8 @@ Dettagli di rendering:
 - `beach_establishments`
 - `events`, `event_categories`, `categories`, `venues`
 - `deskline_events`, `deskline_event_occurrences`, `deskline_themes`, `deskline_event_themes`
-- `site_pages` — testo delle pagine di jesolo.it e natale.jesolo.it, con indice di ricerca full-text (`search_site_pages(p_terms, p_lang, p_limit)`).
-- `site_events` — eventi pubblicati come elenco sui siti di contenuto (es. natale.jesolo.it/eventi), con testi in it/en/de.
+- `site_pages` — testo delle pagine di jesolo.it, natale.jesolo.it e lightson.jesolo.it, con indice di ricerca full-text (`search_site_pages(p_terms, p_lang, p_limit)`).
+- `site_events` — eventi pubblicati come elenco sui siti di contenuto (natale.jesolo.it/eventi; programma serate e Capodanno di lightson.jesolo.it, una riga per locale e data), con testi in it/en/de.
 - `sync_log` — registro della edge function di sync.
 
 **Generati dall'utente:**
@@ -190,7 +190,7 @@ Il "travel agent" AI. Costruisce un itinerario personalizzato giorno per giorno 
 
 Aggiorna i contenuti usati dal wizard. Ogni esecuzione scrive una riga per fonte in `sync_log` (`source`, `status`, `records_synced`, `error`, timestamp). `verify_jwt = false`. Ha due modalità:
 
-- **Lettura (pg_cron ogni 3 giorni alle 04:00 UTC, job `sync-jesolo-data-daily`):** eventi Deskline (`deskline_*`) e natale.jesolo.it (pagine in `site_pages`, eventi di `/eventi` in `site_events`). La lettura diretta di jesolo.it è disattivata: il sito è su SiteGround e la protezione anti-bot dell'hosting blocca le richieste automatiche con un CAPTCHA. Si può ancora forzare con una POST `{"include_wordpress": true}`.
+- **Lettura (pg_cron ogni 3 giorni alle 04:00 UTC, job `sync-jesolo-data-daily`):** eventi Deskline (`deskline_*`), natale.jesolo.it (pagine in `site_pages`, eventi di `/eventi` in `site_events`) e lightson.jesolo.it (pagina it/en in `site_pages`, programma dei locali in `site_events`; l'anno delle date è ricavato dal giorno della settimana indicato). Le pagine privacy/cookie dei siti sono escluse. La lettura diretta di jesolo.it è disattivata: il sito è su SiteGround e la protezione anti-bot dell'hosting blocca le richieste automatiche con un CAPTCHA. Si può ancora forzare con una POST `{"include_wordpress": true}`.
 - **Invio dal sito (header `x-wizard-sync-key`):** il plugin WordPress `wordpress/jesolo-wizard-sync/` installato su jesolo.it invia ogni 3 giorni eventi Tribe, categorie, impianti sportivi, attività, pagine dei percorsi bici, stabilimenti e tutte le pagine pubblicate. La chiave è generata dal plugin (Impostazioni → Jesolo Wizard Sync) e va salvata su Supabase nel secret `WP_SYNC_KEY`. Le pagine non più pubblicate vengono rimosse da `site_pages` alla fine di ogni invio completo.
 
 `generate-vacation-plan` passa all'AI le pagine più pertinenti al profilo dell'utente (`site_pages`, via `search_site_pages`) e gli eventi di `site_events` nelle date del soggiorno; la schermata eventi del wizard mostra anche `site_events`.
